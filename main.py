@@ -8,9 +8,11 @@ import json, os, sqlite3, time, uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import bcrypt
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from jose import JWTError, jwt
 from pydantic import BaseModel, EmailStr, Field
 
@@ -60,6 +62,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static files and templates for a simple login page frontend
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
 fails: dict = {}
 
 def audit(uid, action, cid="", old="", new=""):
@@ -75,7 +82,7 @@ def current(c: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
         uid = jwt.decode(c.credentials, SECRET, ["HS256"])["sub"]
     except JWTError:
         raise HTTPException(401, "Session expired. Please sign in again.")
-    u = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    u = db.execute("SELECT * FROM users WHERE id= ?", (uid,)).fetchone()
     if not u: raise HTTPException(401, "Invalid session.")
     return u
 
@@ -130,6 +137,11 @@ def analyze(title, desc):
 def root():
     return {"name": "Smart Complaint Box API", "status": "online", "domain": DOMAIN}
 
+# Simple login page route (serves templates/login.html)
+@app.get("/login", include_in_schema=False)
+def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request, "domain": DOMAIN})
+
 @app.post("/auth/register", status_code=201)
 def register(b: Register):
     if not b.email.lower().endswith("@" + DOMAIN): raise HTTPException(422, f"Use your @{DOMAIN} email.")
@@ -144,7 +156,7 @@ def register(b: Register):
 def login(b: Login):
     k = b.email.lower(); n, until = fails.get(k, (0, 0))
     if time.time() < until: raise HTTPException(429, "Too many attempts. Try again in a minute.")
-    u = db.execute("SELECT * FROM users WHERE email=?", (k,)).fetchone()
+    u = db.execute("SELECT * FROM users WHERE email= ?", (k,)).fetchone()
     if not u or u["role"] != b.role or not pwd.verify(b.password, u["pw"]):
         fails[k] = (n + 1, time.time() + 60 if n + 1 >= 5 else 0)
         raise HTTPException(401, "Invalid email, password or role.")
@@ -163,16 +175,16 @@ def create(b: NewComplaint, u=Depends(current)):
 
 @app.get("/complaints")
 def list_(u=Depends(current), limit: int = 50, offset: int = 0):
-    q, p = ("SELECT * FROM complaints", []) if u["role"] == "admin" else ("SELECT * FROM complaints WHERE uid=?", [u["id"]])
+    q, p = ("SELECT * FROM complaints", []) if u["role"] == "admin" else ("SELECT * FROM complaints WHERE uid= ?", [u["id"]])
     return [dict(r) for r in db.execute(q + " ORDER BY created DESC LIMIT ? OFFSET ?", p + [min(limit, 100), offset])]
 
 @app.patch("/complaints/{cid}")
 def patch(cid: str, b: Patch, u=Depends(admin_only)):
-    c = db.execute("SELECT * FROM complaints WHERE id=?", (cid,)).fetchone()
+    c = db.execute("SELECT * FROM complaints WHERE id= ?", (cid,)).fetchone()
     if not c: raise HTTPException(404, "Complaint not found.")
     if b.priority and b.priority not in SLA: raise HTTPException(422, "Invalid priority.")
     for f, col in ((b.status, "status"), (b.priority, "priority"), (b.department, "department")):
-        if f: db.execute(f"UPDATE complaints SET {col}=? WHERE id=?", (f, cid)); audit(u["id"], f"change {col}", cid, c[col], f)
+        if f: db.execute(f"UPDATE complaints SET {col}=? WHERE id= ?", (f, cid)); audit(u["id"], f"change {col}", cid, c[col], f)
     db.commit(); return {"ok": True}
 
 @app.get("/audit")
